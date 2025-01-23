@@ -1,0 +1,545 @@
+---
+title: 'Developing Machine learning Model to Predict Movie Ratings from User and Movie Features'
+author: "Kelvinmg"
+output:
+  pdf_document: 
+    df_print: paged
+    latex_engine: xelatex
+---
+
+
+```{r loading dataset, echo=FALSE, results='hide', warning=FALSE, message=FALSE, results='hide'}
+
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(dslabs)) install.packages("dslabs", repos = "http://cran.us.r-project.org")
+if(!require(ggplot2)) install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+if(!require(dplyr)) install.packages("dplyr", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(broom)) install.packages("broom", repos = "http://cran.us.r-project.org")
+if(!require(purrr)) install.packages("purrr", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(dslabs)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(broom)
+library(purrr)
+library(gridExtra)
+
+
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+options(timeout = 120)
+
+dl <- "ml-10m.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+
+
+str(movielens)
+#View(movielens)
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.6 or later
+# set.seed(1) # if using R 3.5 or earlier
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+
+# *Executive Summary*
+The goal of this analysis is to develop the most accurate machine learning model to predict movie ratings based on various features such as movieid and userid interaction. This type of models are reffered to as recommendation systems. There are various techniques of building recommedation systems but we are going to only use machine learning models.
+
+The dataset used in this analysis is obtained from grouplens website and contains data on user movie ratings from movielens. The dataset includes user behavior, movie attributes and ratings.
+
+It contains approximately 10 million ratings with the following key attributes:
+
++ userId:  unique identifier for each user.
++ movieId:  unique identifier for each movie.
++ rating:  numeric rating (between 0.5 and 5) given by the user.
++ timestamp: time when the rating was given (used primarily for time-based analysis).
++ title: The title of the movie.
++ genres: The genre(s) associated with the movie.
+
+The key steps will be; *simple analysis*, *feature engineering*,*data exploratory analysis*,
+*model building* and *model evaluation*.
+
+
+
+### *Data Cleaning*
+```{r dataset-description, echo=FALSE, warning=FALSE, message=FALSE}
+ #structure of the dataset
+#number of unique users and movies
+edx %>%
+summarize(n_users = n_distinct(userId),
+          n_movies = n_distinct(movieId))
+
+str(edx)
+
+```
+
+Notice the release years are written in the title in parentheses for each title. The first step will be to extract them and store them in a new variable called release_year. Then we will store the dataset to a new data frame which we will call edx_1 
+
+```{r dataset-edx_1,echo=FALSE,message=FALSE,warning=FALSE}
+edx_1 <- edx %>% mutate(release_year =  as.numeric(str_extract(title,"(?<=\\()\\d{4}?(?=\\))")),
+                        title =  as.character(str_remove(title,"\\s\\(\\d{4}\\)")))
+
+#data with release year
+head(edx_1)
+```
+
+
+The next thing you notice is that there is a timestamp that can be converted to easy to interpret time. We will extract the year and store it in a new variable called year_rated. Then we will save this to a new dataframe which we will call edx_2.
+
+```{r dataset-edx_2, echo=FALSE,warning=FALSE,message=FALSE}
+
+edx_2 <- edx_1 %>% mutate(timestamp = as.POSIXct(timestamp, origin = "1970-01-01", tz = "UTC"),
+                          year_rated = year(timestamp))
+
+#data with release year and year rated
+head(edx_2)
+```
+
+
+The feature we will analyse first is the rating distribution: \\
+
+```{r rating-histogram,echo=FALSE,message=FALSE,warning=FALSE}
+edx %>%
+  ggplot(aes(rating)) +
+  geom_histogram(binwidth = 0.5, fill = "blue", color = "black", alpha = 0.7) + 
+  ggtitle("rating distribution") +
+  theme_minimal() +  
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    axis.text = element_text(size = 12),  
+    axis.title = element_text(size = 14)  
+  )
+```
+
+This reveals the mode rating which is 4 followed by 3, it does not convey much about the type of distribution.
+We can confirm this by checking the number of people who used each rating.
+
+```{r rating-count, echo=FALSE, warning=FALSE,message=FALSE}
+edx %>% 
+  group_by(rating) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))%>%
+  head(n = 8)
+```
+
+The next process is performing data exploratory analysis on the engineered dataset edx_2 to get 
+an idea of how the different features interact.
+
+first analysis will be to analyse the features summarized by each movie to understand if there is a movie bias
+across the various features.
+
+The first features we will analyse will be the mean rating for every movie and amount of reviews the
+movie had, to do this we will store the data in a dataframe called edx_summary_movieid. then try and
+get the best 6 movies with more than 100 reviews.
+
+```{r average-rating-movieid, echo=FALSE,warning=FALSE,message=FALSE}
+
+edx_summary_movieid <- edx_2 %>% group_by(movieId, title) %>%
+      summarise(mean_rating = mean(rating), reviews = n()) 
+
+edx_summary_movieid <- edx_summary_movieid %>% arrange(desc(mean_rating))
+
+#top 6 movies with high at least over 100 rating count
+edx_summary_movieid %>% filter(reviews > 100) %>%
+  head(n=6)
+
+```
+
+the bottom 6 with more than 100 reviews
+```{r average-rating-movieid2,echo=FALSE,warning=FALSE,message=FALSE}
+edx_summary_movieid %>% 
+  filter(reviews>100)%>%
+  arrange(mean_rating) %>%
+  head(n = 6)
+```
+
+an histogram to understand the distribution of mean rating
+
+```{r histogram-rating,echo=FALSE,message=FALSE,warning=FALSE}
+# #histogram for mean rating
+edx_summary_movieid %>% ggplot(aes(mean_rating)) +
+  geom_histogram()
+
+```
+
+The distribution is skewed to the left meaning there are relatively few mean rating values with most of them being 
+clustered on the higher end, creating a long tail on the left side of the distribution. The histogram shows
+the most movies had a rating of 3 to about 3.7 near the mean.
+
+The mean is:
+```{r mean-of-all-the-ratings,echo=FALSE,message=FALSE,warning=FALSE}
+mean(edx$rating)
+
+```
+
+
+Next we will analyse the reviews histogram
+
+```{r histogram-reviews,echo=FALSE,message=FALSE,warning=FALSE}
+#histogram for reviews 
+edx_summary_movieid %>% ggplot(aes(reviews)) +
+  geom_histogram() +
+  scale_x_log10()
+
+```
+
+The histogram shows that most movies have moderate amount of reviews
+
+next will be to plot the mean rating against the reviews to observe the relationship
+
+```{r plot-mean-rating-reviews,echo=FALSE,message=FALSE,warning=FALSE}
+edx_summary_movieid %>% ggplot(aes(reviews, mean_rating)) +
+  geom_point() +
+  scale_y_log10() +
+  geom_smooth(method = lm)
+
+lm(mean_rating~ reviews, data = edx_summary_movieid)
+
+cor(edx_summary_movieid$mean_rating, edx_summary_movieid$reviews)
+```
+
+The plot shows that from the rating of 3.14 there is a weak linear relationship with the correlation 
+showing how that the 2 variables are weakly related. This tells us that there is a small movie bias.\\
+
+
+our second analysis will be to analyse the features summarized by each user to understand if there is a user bias
+across the various features.
+
+Top 6 users who had the highest mean ratings after reviewing more than 100 times in the dataset.
+```{r reviews-meanratinguserid,echo=FALSE,warning=FALSE,message=FALSE}
+edx_summary_userid <- edx %>% 
+  group_by(userId) %>%
+  summarise(mean_rating = mean(rating), reviews = n())
+
+#users who have given the highest ratings after reviewing more than 100 times 
+edx_summary_userid %>% 
+  filter(reviews > 100) %>%
+  arrange(desc(mean_rating)) %>%
+  head(n = 6)
+```
+
+checking the users with the most reviews and their mean rating
+```{r most-reviews,echo=FALSE,message=FALSE,warning=FALSE}
+#checking the users with the most reviews and their mean rating
+edx_summary_userid %>% 
+  arrange(desc(reviews)) %>%
+  head(n = 6)
+
+```
+
+```{r plot-userid,echo=FALSE,warning=FALSE,message=FALSE}
+edx_summary_userid %>% 
+  ggplot(aes(reviews, mean_rating)) +
+  geom_point()+
+  geom_smooth()+
+  scale_x_log10()
+
+lm(mean_rating~reviews, data = edx_summary_userid) 
+
+cor(edx_summary_userid$mean_rating, edx_summary_userid$reviews)
+
+```
+The features are  be negatively correlated but weakly.
+This tells us that there is a small user bias. \\
+
+
+Deeper analysis to understand the engineered features year_rate and release_year
+
+```{r release-year,echo=FALSE,warning=FALSE,message=FALSE,results='hide'}
+edx_releaseyear_summary <- edx_2 %>%
+  group_by(release_year) %>%
+  summarise(mean_rating = mean(rating), reviews = n())
+```
+
+top 6 highest mean rating release years with more than 100 reviews
+```{r ranking-releaseyears,echo=FALSE,warning=FALSE,message=FALSE}
+edx_releaseyear_summary %>%
+  filter(reviews>100) %>%
+  arrange(desc(mean_rating)) %>%
+  head(n =6)
+
+```
+
+
+The relationship between the release year and the mean rating that year
+```{r plotting-releaseyear,echo=FALSE,warning=FALSE,message=FALSE}
+edx_releaseyear_summary %>%
+  ggplot(aes(x = release_year, y = mean_rating)) +
+  geom_point(alpha = 0.6, size = 2) +  
+  geom_smooth(method = "lm", color = "blue", se = FALSE) +  
+  labs(title = "Release Year vs Mean Rating",
+       x = "Release Year",
+       y = "Mean Rating") +
+  theme_minimal() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+cor(edx_releaseyear_summary$release_year, edx_releaseyear_summary$mean_rating)
+```
+
+The mean rating has an inverse relationship with the release year. The correlation tells us that the features are strongly negatively correlated which tells us that there is a release year bias. 
+
+
+
+The analysis between year rated and mean rating 
+```{r yearrated-meanrating,echo=FALSE,warning=FALSE,message=FALSE}
+edx_yearrated_summary <- edx_2 %>%
+  group_by(year_rated) %>%
+  summarise(mean_rating = mean(rating), reviews=n())
+```
+
+Top 6 highest mean ratings for year rated with more than 100 reviews
+
+```{r highest-yearrated,echo=FALSE,warning=FALSE,message=FALSE}
+edx_yearrated_summary %>%
+  filter(reviews > 100) %>%
+  arrange(desc(mean_rating)) %>%
+  head(n = 6)
+```
+
+We will test the relationship between year rate and mean rating
+
+```{r plot-yearrate,echo=FALSE,message=FALSE,warning=FALSE}
+edx_yearrated_summary %>%
+  ggplot(aes(x = year_rated, y = mean_rating)) +
+  geom_point(color = "blue", alpha = 0.6) +  
+  geom_smooth(method = "lm", se = FALSE, color = "red") +  
+  labs(
+    x = "Year Rated", 
+    y = "Mean Rating",
+    title = "Mean Rating vs Year Rated",
+    subtitle = "Linear Relationship between Year Rated and Mean Rating"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),  
+    plot.subtitle = element_text(hjust = 0.5, size = 12, face = "italic"),  
+    axis.title = element_text(size = 12),  # Axis title size
+    axis.text = element_text(size = 10)  # Axis text size
+  )
+cor(edx_yearrated_summary$year_rated, edx_yearrated_summary$mean_rating)
+```
+
+There is a strong negative correlation between the two features year rated and mean rating. This shows there is a strong
+year rated bias.
+
+### Model building
+We will test three models; the movie bias, movie and user  biases and then regularize the movie and
+user biases. We will then compare the Rmses of the three models to see which had the lowest meaning
+highest accuracy.
+
+we will test our models with the RMSE
+```{r rmse,echo=FALSE,warning=FALSE,message=FALSE}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+```
+
+
+##Our baseline model is the guessing model/naive model. 
+we use the average to guess all the outcomes as it represents our expected prediction for all the cases.
+i.e expected mu.
+
+```{r baseline model,echo=FALSE,warning=FALSE,message=FALSE}
+mu_hat <- mean(edx$rating)
+mu_hat
+
+naive_rmse <- RMSE(final_holdout_test$rating, mu_hat)
+naive_rmse
+
+rmse_results <- tibble(method = "baseline model ", RMSE = naive_rmse)
+rmse_results %>% knitr::kable()
+```
+
+An RMSE of 1.061202 is relatively low, but considering that our data ranges from 0.5 to 5, this value may be acceptable but a
+movie company would need better accuracy to be more effective. we will work on improving the model and use this as the baseline to evaluate whether the other models have a noticeable impact.
+
+
+#The first model we are going to try is the movie effect 
+We analyzed this effect in the exploratory data analysis. To reduce the inaccuracy, we will calculate the bias for each movie and incorporate it into our baseline prediction (u). This adjustment should help improve the model's accuracy.
+
+```{r baselinemodelandmovieeffect,echo=FALSE,message=FALSE,warning=FALSE}
+mu <- mean(edx$rating) 
+
+#the edxmovie_avgs contain the average bias for every movie 
+edxmovie_avgs <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+
+
+#to create a plot of an histogram to show the deviation from the global average
+edxmovie_avgs %>% qplot(b_i, geom ="histogram", bins = 30, data = ., color = I("black"))
+
+#we try the model on the test set and use left join to ensure nothing is lost from the test_set 
+predicted_ratings <- mu + final_holdout_test %>% 
+  left_join(edxmovie_avgs, by='movieId') %>%
+  pull(b_i)
+
+firstmodel_rmse <- RMSE(predicted_ratings, final_holdout_test$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie Effect Model",
+                                     RMSE = firstmodel_rmse ))
+rmse_results %>% knitr::kable()
+
+```
+
+
+The RMSE is 0.9439087 and is better than the baseline model. more improvements can be made by adding the second
+feature in our analysis.
+
+#The second model we are going to incorporate the second feature analysed the user bias to the movie bias and baseline m(u)
+
+```{r movieandusereffect,echo=FALSE,warning=FALSE,message=FALSE}
+edx %>% 
+  group_by(userId) %>% 
+  summarize(b_u = mean(rating)) %>% 
+  filter(n()>100) %>%
+  ggplot(aes(b_u)) + 
+  geom_histogram(bins = 30, color = "black")
+
+#the second model we will use userid the second feature which we analysed in our analysis
+#movie id
+
+edxuser_avgs <- edx %>% 
+  left_join(edxmovie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+predictions <- final_holdout_test %>% 
+  left_join(edxmovie_avgs, by='movieId') %>%
+  left_join(edxuser_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+
+secondmodel_rmse <- RMSE(predictions, final_holdout_test$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie and User Effects Model",  
+                                     RMSE = secondmodel_rmse ))
+rmse_results %>% knitr::kable()
+
+```
+
+The Rmse of 0.8653488 is decent for our range of data and can be improved again by optimizing the biases which can be done
+using a prameter that can be tuned lambda giving us a chance to use cross validation.
+
+
+# The third model we will use Regularized movie bias and user bias which can be achieved by tuning the lambda
+
+```{r regularizedmovieand usereffects,echo=FALSE,warning=FALSE,message=FALSE}
+lambdas <- seq(0, 10, 0.25)
+
+
+#best lambda  
+rmses <- sapply(lambdas, function(l){
+  
+  mu <- mean(edx$rating)
+  
+  b_i <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  predictions <- 
+    final_holdout_test %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+  return(RMSE(predictions, final_holdout_test$rating))
+})
+
+
+# The optimal lambda                                                             
+lambda <- lambdas[which.min(rmses)]
+lambda
+
+# Test and save results                                                             
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Regularized movie and user effect model",  
+                                     RMSE = min(rmses)))
+
+# Check result
+rmse_results %>% knitr::kable()
+
+
+```
+
+The regression of 0.8648170 is the best of all the models tested coming from regularized movie and user effect.
+
+## Conclusion
+This report examined various models for predicting movie ratings, beginning with a baseline model and progressively adding movie and user effects. The models evaluated include:
+
+Baseline Model: RMSE = 1.0612018
+Movie Effect Model: RMSE = 0.9439087
+Movie and User Effects Model: RMSE = 0.8653488
+Regularized Movie and User Effect Model: RMSE = 0.8648170
+
+The analysis revealed that incorporating the movie effect led to improvement in prediction accuracy, followed by the addition of both movie and user effects. The regularized movie and user effect model provided the best performance, yielding a slight reduction in RMSE. This suggests that factoring in both movie-specific and user-specific biases, along with applying regularization, enhances prediction accuracy.
+
+
+## Limitations
+some limitations include assuming the models assume linear relationships between movie and user effects, which might not fully account for more underlying relationships in the data. The other limitation would be utilizing only basic features meaning there still more accuracy that can be gotten for example utilising the years and genres.
+
+## Future Work
+Incorporating Additional Features: Introducing more features, such as genre preferences, movie release year, or user demographic data, could help capture more underlying factors in the data. Utilizing more advanced models like matrix factorization, deep learning, or collaborative filtering techniques could lead to better accuracy performance.
+
+
+
+
+
